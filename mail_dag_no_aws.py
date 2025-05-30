@@ -1,12 +1,15 @@
 from airflow import DAG
 from airflow.decorators import task
-from airflow.models import Variable
+from airflow.sdk import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.hooks.base import BaseHook
 from datetime import datetime, timedelta
 import requests
 import json
 import pandas as pd
 import os
+
+POSTGRES_CONN_ID = 'postgres_default'
 
 default_args = {
     'owner': 'airflow',
@@ -18,7 +21,7 @@ default_args = {
 with DAG(
     dag_id='ms_graph_email_etl_postgres',
     default_args=default_args,
-    schedule_interval='@daily',
+    schedule='@daily',
     catchup=False,
     tags=['email', 'graph', 'etl', 'postgres']
 ) as dag:
@@ -43,39 +46,43 @@ with DAG(
             return response.json()['access_token']
         else:
             raise Exception(f"Failed to get token: {response.status_code} - {response.text}")
+        
+    import logging
 
     @task()
     def extract_emails_from_folders(access_token: str):
+
         graph_base = "https://graph.microsoft.com/v1.0"
         user_email = Variable.get("MS_GRAPH_USER_EMAIL")
-        folder_names = json.loads(Variable.get("MS_GRAPH_FOLDER_NAMES", default_var = '["Inbox"]'))
+        folder_names = json.loads(Variable.get("MS_GRAPH_FOLDER_NAMES", default='["Inbox"]'))
+
 
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json"
         }
 
-    def get_folder_id(folder_name):
-        if folder_name.strip().lower() == "inbox":
-            # Directly get the Inbox folder
-            inbox_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox"
-            response = requests.get(inbox_url, headers=headers)
-            if response.status_code == 200:
-                folder = response.json()
-                return folder["id"]
-            else:
-                raise Exception(f"Error fetching Inbox folder: {response.status_code}, {response.text}")
-        else:
-            # Search in child folders of Inbox
-            inbox_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox"
-            response = requests.get(inbox_url + "/childFolders", headers=headers)
-            if response.status_code != 200:
-                raise Exception(f"Error fetching child folders: {response.status_code}, {response.text}")
-            folders = response.json().get("value", [])
-            for folder in folders:
-                if folder["displayName"].strip().lower() == folder_name.strip().lower():
+        def get_folder_id(folder_name):
+            if folder_name.strip().lower() == "inbox":
+                # Directly get the Inbox folder
+                inbox_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox"
+                response = requests.get(inbox_url, headers=headers)
+                if response.status_code == 200:
+                    folder = response.json()
                     return folder["id"]
-            raise Exception(f"Folder '{folder_name}' not found.")
+                else:
+                    raise Exception(f"Error fetching Inbox folder: {response.status_code}, {response.text}")
+            else:
+                # Search in child folders of Inbox
+                inbox_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox"
+                response = requests.get(inbox_url + "/childFolders", headers=headers)
+                if response.status_code != 200:
+                    raise Exception(f"Error fetching child folders: {response.status_code}, {response.text}")
+                folders = response.json().get("value", [])
+                for folder in folders:
+                    if folder["displayName"].strip().lower() == folder_name.strip().lower():
+                        return folder["id"]
+                raise Exception(f"Folder '{folder_name}' not found.")
 
 
         def fetch_emails(folder_id):
@@ -96,7 +103,7 @@ with DAG(
             folder_id = get_folder_id(folder_name)
             emails = fetch_emails(folder_id)
             all_emails[folder_name] = emails
-        return {"emails_by_folder": all_emails, "user_email": user_email}
+        
     
         logging.info(f"User: {user_email}")
         for folder, emails in all_emails.items():
@@ -126,7 +133,7 @@ with DAG(
 
         cursor.execute("""
 
-            CREATE TABLE IF NOT EXISTS email (
+            CREATE TABLE IF NOT EXISTS email_group (
 
                 email_id TEXT PRIMARY KEY,
 
@@ -156,7 +163,7 @@ with DAG(
 
                     cursor.execute("""
 
-                        INSERT INTO email (
+                        INSERT INTO email_group (
 
                             email_id, thread_id, from_name, from_email,
 
@@ -194,11 +201,6 @@ with DAG(
 
         cursor.close()
  
-
-    # DAG task flow
-    token = get_graph_token()
-    email_data = extract_emails_from_folders(token)
-    load_to_postgres(email_data)
 
     # DAG task flow
     token = get_graph_token()
