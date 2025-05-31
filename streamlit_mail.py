@@ -22,11 +22,11 @@ st.set_page_config(
 def init_connection():
     """Initialize database connection"""
     return psycopg2.connect(
-        host=st.secrets["postgres"]["host"],
-        database=st.secrets["postgres"]["database"],  
-        user=st.secrets["postgres"]["user"],
-        password=st.secrets["postgres"]["password"],
-        port=st.secrets["postgres"]["port"]
+        host="localhost",
+        database="postgres",  
+        user="postgres",
+        password="postgres",
+        port="5432"
     )
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -68,8 +68,12 @@ def load_email_data():
 def process_email_data(emails_df, relationships_df, analytics_df):
     """Process and clean email data"""
     # Convert datetime columns
-    emails_df['received_datetime'] = pd.to_datetime(emails_df['received_datetime'])
-    emails_df['sent_datetime'] = pd.to_datetime(emails_df['sent_datetime'])
+    emails_df['received_datetime'] = pd.to_datetime(emails_df['received_datetime'], errors = 'coerce')
+    emails_df['sent_datetime'] = pd.to_datetime(emails_df['sent_datetime'], errors = 'coerce')
+
+    # Drop rows where 'received_datetime' is missing (or handle differently if preferred)
+    emails_df = emails_df[emails_df['received_datetime'].notna()].copy()
+
     emails_df['date'] = emails_df['received_datetime'].dt.date
     emails_df['hour'] = emails_df['received_datetime'].dt.hour
     emails_df['weekday'] = emails_df['received_datetime'].dt.day_name()
@@ -274,6 +278,18 @@ def create_filters_sidebar(emails_df):
     min_date = emails_df['date'].min()
     max_date = emails_df['date'].max()
     
+    if isinstance(min_date, pd.Timestamp):
+        min_date = min_date.date()
+
+    if isinstance(min_date, np.datetime64):
+        min_date = pd.to_datetime(min_date).date()   
+    
+    if isinstance(max_date, pd.Timestamp):
+        max_date = max_date.date()
+
+    if isinstance(max_date, np.datetime64):
+        max_date = pd.to_datetime(max_date).date()
+
     date_range = st.sidebar.date_input(
         "Select Date Range",
         value=(min_date, max_date),
@@ -328,14 +344,14 @@ def main():
     # Load data
     try:
         with st.spinner("Loading email data..."):
-            emails_df, relationships_df, analytics_df = load_email_data()
-            merged_df, analytics_df = process_email_data(emails_df, relationships_df, analytics_df)
+            emails_df_raw, relationships_df, analytics_df = load_email_data()
+            merged_df, analytics_df = process_email_data(emails_df_raw, relationships_df, analytics_df)
         
         # Create filters
-        date_range, selected_folders, selected_importance = create_filters_sidebar(emails_df)
+        date_range, selected_folders, selected_importance = create_filters_sidebar(merged_df)
         
         # Apply filters
-        filtered_emails = apply_filters(emails_df, date_range, selected_folders, selected_importance)
+        filtered_emails = apply_filters(merged_df, date_range, selected_folders, selected_importance)
         filtered_merged = merged_df[merged_df['email_id'].isin(filtered_emails['email_id'])]
         
         # Overview metrics
@@ -349,7 +365,7 @@ def main():
             create_incoming_analytics(filtered_emails, filtered_merged)
         
         with tab2:
-            create_response_analytics(filtered_merged, analytics_df)
+            create_response_analytics(merged_df, filtered_merged)
         
         with tab3:
             create_conversation_details(analytics_df, filtered_merged)
