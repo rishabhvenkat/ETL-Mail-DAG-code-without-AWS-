@@ -92,7 +92,7 @@ with DAG(
         def fetch_emails(folder_id):
             emails = []
             # Enhanced query to get more email details for analytics
-            url = f"{graph_base}/users/{user_email}/mailFolders/{folder_id}/messages?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,flag,internetMessageId,inReplyTo,references&$orderby=receivedDateTime desc"
+            url = f"{graph_base}/users/{user_email}/mailFolders/{folder_id}/messages?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,flag,internetMessageId&$orderby=receivedDateTime desc"
             while url:
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
@@ -264,7 +264,6 @@ with DAG(
                 has_attachments BOOLEAN,
                 importance TEXT,
                 internet_message_id TEXT,
-                in_reply_to TEXT,
                 to_recipients TEXT,
                 cc_recipients TEXT
             );
@@ -319,8 +318,8 @@ with DAG(
                             email_id, thread_id, from_name, from_email,
                             subject, received_date, received_time, sent_date, sent_time,
                             folder, is_read, has_attachments, importance,
-                            internet_message_id, in_reply_to, to_recipients, cc_recipients
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            internet_message_id, to_recipients, cc_recipients
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (email_id) DO UPDATE SET
                             is_read = EXCLUDED.is_read,
                             folder = EXCLUDED.folder;
@@ -339,7 +338,6 @@ with DAG(
                         msg.get('hasAttachments', False),
                         msg.get('importance', 'normal'),
                         msg.get('internetMessageId'),
-                        msg.get('inReplyTo'),
                         ','.join(to_recipients),
                         ','.join(cc_recipients)
                     ))
