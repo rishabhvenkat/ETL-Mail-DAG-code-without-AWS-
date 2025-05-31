@@ -13,8 +13,6 @@ from typing import Dict, List, Any
 
 POSTGRES_CONN_ID = 'postgres_default'
 
-MAX_EMAILS_PER_FOLDER = 500  # Limit to avoid 504 errors
-
 default_args = {
     'owner': 'airflow',
     'start_date': datetime(2024, 1, 1),
@@ -183,30 +181,53 @@ with DAG(
                     return folder["id"]
             raise Exception(f"Folder '{folder_name}' not found.")
 
-        def fetch_emails(folder_id):
+        def fetch_all_emails(folder_id, folder_name):
+            """Fetch all emails from a folder without limit"""
             emails = []
             url = f"{graph_base}/users/{user_email}/mailFolders/{folder_id}/messages"
             url += "?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,flag,internetMessageId"
             url += "&$orderby=receivedDateTime desc"
-            while url and len(emails) < MAX_EMAILS_PER_FOLDER:
+            
+            page_count = 0
+            while url:
+                page_count += 1
+                logging.info(f"Fetching page {page_count} from folder '{folder_name}' (Current total: {len(emails)} emails)")
+                
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
-                    emails.extend(data.get("value", []))
-                    if len(emails) >= MAX_EMAILS_PER_FOLDER:
-                        break
+                    page_emails = data.get("value", [])
+                    emails.extend(page_emails)
+                    
+                    # Log progress every 10 pages
+                    if page_count % 10 == 0:
+                        logging.info(f"Processed {page_count} pages from folder '{folder_name}', fetched {len(emails)} emails so far")
+                    
                     url = data.get("@odata.nextLink", None)
+                    
+                    # If no more pages, break
+                    if not url:
+                        break
+                        
                 else:
-                    raise Exception(f"Error fetching emails: {response.status_code}, {response.text}")
-            return emails[:MAX_EMAILS_PER_FOLDER]
+                    raise Exception(f"Error fetching emails from {folder_name} (page {page_count}): {response.status_code}, {response.text}")
+            
+            logging.info(f"Successfully fetched {len(emails)} emails from folder '{folder_name}' in {page_count} pages")
+            return emails
 
         all_emails = {}
+        total_emails_count = 0
+        
         for folder_name in folder_names:
+            logging.info(f"Starting extraction from folder: {folder_name}")
             folder_id = get_folder_id(folder_name)
-            emails = fetch_emails(folder_id)
+            emails = fetch_all_emails(folder_id, folder_name)
             all_emails[folder_name] = emails
+            total_emails_count += len(emails)
+            logging.info(f"Completed extraction from folder '{folder_name}': {len(emails)} emails")
 
-        return {"emails_by_folder": all_emails, "user_email": user_email}
+        logging.info(f"Total emails extracted from all folders: {total_emails_count}")
+        return {"emails_by_folder": all_emails, "user_email": user_email, "total_count": total_emails_count}
 
     @task()
     def analyze_email_responses(data):
@@ -214,6 +235,9 @@ with DAG(
 
         all_emails = data.get("emails_by_folder", {})
         user_email = data.get("user_email", "")
+        total_count = data.get("total_count", 0)
+
+        logging.info(f"Starting analysis of {total_count} emails")
 
         all_email_list = []
         for folder, emails in all_emails.items():
@@ -221,11 +245,15 @@ with DAG(
                 email['folder'] = folder
                 all_email_list.append(email)
 
+        logging.info(f"Analyzing {len(all_email_list)} emails across {len(all_emails)} folders")
+
         conversations = {}
         for email in all_email_list:
             conv_id = email.get('conversationId')
             if conv_id:
                 conversations.setdefault(conv_id, []).append(email)
+
+        logging.info(f"Found {len(conversations)} unique conversations")
 
         email_relationships = []
         conversation_analytics = []
@@ -288,11 +316,14 @@ with DAG(
                 'last_activity_date': emails_sorted[-1].get('receivedDateTime', '')[:10]
             })
 
+        logging.info(f"Analysis completed: {len(email_relationships)} relationships, {len(conversation_analytics)} conversation metrics")
+
         return {
             "emails_by_folder": all_emails,
             "user_email": user_email,
             "email_relationships": email_relationships,
-            "conversation_analytics": conversation_analytics
+            "conversation_analytics": conversation_analytics,
+            "total_count": total_count
         }
 
     @task()
@@ -304,9 +335,17 @@ with DAG(
         emails = data['emails_by_folder']
         relationships = data['email_relationships']
         analytics = data['conversation_analytics']
+        total_count = data.get('total_count', 0)
 
-        # Insert emails with proper error handling
+        logging.info(f"Starting to load {total_count} emails to PostgreSQL")
+
+        # Insert emails with proper error handling and batch processing
+        email_count = 0
+        error_count = 0
+        
         for folder, email_list in emails.items():
+            logging.info(f"Loading {len(email_list)} emails from folder '{folder}'")
+            
             for email in email_list:
                 try:
                     cursor.execute("""
@@ -340,11 +379,23 @@ with DAG(
                         email.get('folder'),
                         email.get('internetMessageId')
                     ))
+                    email_count += 1
+                    
+                    # Log progress every 1000 emails
+                    if email_count % 1000 == 0:
+                        logging.info(f"Loaded {email_count} emails so far...")
+                        
                 except Exception as e:
                     logging.error(f"Error inserting email {email.get('id', 'unknown')}: {str(e)}")
+                    error_count += 1
                     continue
 
+        logging.info(f"Loaded {email_count} emails successfully, {error_count} errors")
+
         # Insert relationships
+        relationship_count = 0
+        relationship_errors = 0
+        
         for rel in relationships:
             try:
                 cursor.execute("""
@@ -362,11 +413,18 @@ with DAG(
                     rel['email_id'], rel['conversation_id'], rel['is_response'], rel['is_from_user'],
                     rel['original_email_id'], rel['response_time_hours'], rel['position_in_thread'], rel['thread_length']
                 ))
+                relationship_count += 1
             except Exception as e:
                 logging.error(f"Error inserting relationship for email {rel.get('email_id', 'unknown')}: {str(e)}")
+                relationship_errors += 1
                 continue
 
+        logging.info(f"Loaded {relationship_count} relationships successfully, {relationship_errors} errors")
+
         # Insert analytics with upsert
+        analytics_count = 0
+        analytics_errors = 0
+        
         for metric in analytics:
             try:
                 cursor.execute("""
@@ -386,14 +444,20 @@ with DAG(
                     metric['external_emails_count'], metric['user_response_count'],
                     metric['response_rate_percent'], metric['conversation_start_date'], metric['last_activity_date']
                 ))
+                analytics_count += 1
             except Exception as e:
                 logging.error(f"Error inserting analytics for conversation {metric.get('conversation_id', 'unknown')}: {str(e)}")
+                analytics_errors += 1
                 continue
 
         conn.commit()
         cursor.close()
         conn.close()
-        logging.info("Data loaded to PostgreSQL successfully")
+        
+        logging.info(f"Data loading completed successfully:")
+        logging.info(f"  - Emails: {email_count} loaded, {error_count} errors")
+        logging.info(f"  - Relationships: {relationship_count} loaded, {relationship_errors} errors")
+        logging.info(f"  - Analytics: {analytics_count} loaded, {analytics_errors} errors")
 
     # Define task dependencies
     tables = create_tables()
