@@ -20,9 +20,9 @@ def load_email_data():
     """Load main email data"""
     query = "SELECT * FROM email_group;"
     df = pd.read_sql(query, engine)
-    df['received_date'] = pd.to_datetime(df['received_date'])
-    if 'sent_date' in df.columns:
-        df['sent_date'] = pd.to_datetime(df['sent_date'])
+    df['received_datetime'] = pd.to_datetime(df['received_datetime'])
+    if 'sent_datetime' in df.columns:
+        df['sent_datetime'] = pd.to_datetime(df['sent_datetime'])
     return df
 
 @st.cache_data
@@ -56,12 +56,12 @@ def load_combined_data():
         ca.total_emails as conversation_total_emails
     FROM email_group eg
     LEFT JOIN email_relationships er ON eg.email_id = er.email_id
-    LEFT JOIN conversation_analytics ca ON eg.thread_id = ca.conversation_id
+    LEFT JOIN conversation_analytics ca ON eg.conversation_id = ca.conversation_id
     """
     df = pd.read_sql(query, engine)
-    df['received_date'] = pd.to_datetime(df['received_date'])
-    if 'sent_date' in df.columns:
-        df['sent_date'] = pd.to_datetime(df['sent_date'])
+    df['received_datetime'] = pd.to_datetime(df['received_datetime'])
+    if 'sent_datetime' in df.columns:
+        df['sent_datetime'] = pd.to_datetime(df['sent_datetime'])
     return df
 
 try:
@@ -80,8 +80,8 @@ try:
         selected_folders = st.multiselect("Select Folders", folders, default=folders)
         
         # Date filter
-        date_min, date_max = df['received_date'].min(), df['received_date'].max()
-        selected_dates = st.date_input("Date Range", [date_min, date_max])
+        date_min, date_max = df['received_datetime'].min(), df['received_datetime'].max()
+        selected_dates = st.date_input("Date Range", [date_min.date(), date_max.date()])
         
         # Response filter
         st.subheader("Response Filters")
@@ -89,7 +89,7 @@ try:
         show_user_emails_only = st.checkbox("Show Only User Emails")
         
         # Response time filter
-        if not response_df.empty:
+        if not response_df.empty and 'response_time_hours' in response_df.columns:
             max_response_time = response_df['response_time_hours'].max()
             if pd.notna(max_response_time):
                 response_time_filter = st.slider(
@@ -103,8 +103,8 @@ try:
     # Apply filters
     filtered_df = combined_df[
         (combined_df['folder'].isin(selected_folders)) &
-        (combined_df['received_date'] >= pd.to_datetime(selected_dates[0])) &
-        (combined_df['received_date'] <= pd.to_datetime(selected_dates[1]))
+        (combined_df['received_datetime'] >= pd.to_datetime(selected_dates[0])) &
+        (combined_df['received_datetime'] <= pd.to_datetime(selected_dates[1]))
     ].copy()
     
     if show_responses_only:
@@ -123,7 +123,7 @@ try:
         st.metric("Total Emails", len(filtered_df))
     
     with col2:
-        st.metric("Unique Senders", filtered_df['from_email'].nunique())
+        st.metric("Unique Senders", filtered_df['from_address'].nunique())
     
     with col3:
         if not conversation_df.empty:
@@ -162,11 +162,12 @@ try:
         
         with col1:
             # Emails by Date
-            by_date = filtered_df.groupby('received_date').size().reset_index(name='count')
+            by_date = filtered_df.groupby(filtered_df['received_datetime'].dt.date).size().reset_index(name='count')
+            by_date.columns = ['date', 'count']
             chart = alt.Chart(by_date).mark_line(point=True).encode(
-                x=alt.X('received_date:T', title='Date'),
+                x=alt.X('date:T', title='Date'),
                 y=alt.Y('count:Q', title='Number of Emails'),
-                tooltip=['received_date:T', 'count:Q']
+                tooltip=['date:T', 'count:Q']
             ).properties(width=400, height=300, title="Emails Received Over Time")
             st.altair_chart(chart, use_container_width=True)
         
@@ -183,11 +184,11 @@ try:
         
         # Top Senders
         st.subheader("Top Email Senders")
-        top_senders = filtered_df.groupby('from_email').size().reset_index(name='count').sort_values('count', ascending=False).head(10)
+        top_senders = filtered_df.groupby('from_address').size().reset_index(name='count').sort_values('count', ascending=False).head(10)
         chart = alt.Chart(top_senders).mark_bar().encode(
             x=alt.X('count:Q', title='Number of Emails'),
-            y=alt.Y('from_email:N', title='Sender Email', sort='-x'),
-            tooltip=['from_email:N', 'count:Q']
+            y=alt.Y('from_address:N', title='Sender Email', sort='-x'),
+            tooltip=['from_address:N', 'count:Q']
         ).properties(height=400, title="Most Active Email Senders")
         st.altair_chart(chart, use_container_width=True)
     
@@ -236,18 +237,19 @@ try:
             # Response Time Trends
             st.subheader("Response Time Trends")
             if not user_responses.empty:
-                response_trends = user_responses.groupby('received_date')['response_time_hours'].agg(['mean', 'median', 'count']).reset_index()
+                response_trends = user_responses.groupby(user_responses['received_datetime'].dt.date)['response_time_hours'].agg(['mean', 'median', 'count']).reset_index()
+                response_trends.columns = ['date', 'mean', 'median', 'count']
                 
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 
                 fig.add_trace(
-                    go.Scatter(x=response_trends['received_date'], y=response_trends['mean'], 
+                    go.Scatter(x=response_trends['date'], y=response_trends['mean'], 
                               mode='lines+markers', name='Average Response Time'),
                     secondary_y=False,
                 )
                 
                 fig.add_trace(
-                    go.Bar(x=response_trends['received_date'], y=response_trends['count'], 
+                    go.Bar(x=response_trends['date'], y=response_trends['count'], 
                           name='Number of Responses', opacity=0.3),
                     secondary_y=True,
                 )
@@ -398,4 +400,17 @@ except Exception as e:
         st.write("- conversation_analytics (conversation metrics)")
         st.write(f"Connection string: {DB_URI}")
         st.write(f"Error details: {str(e)}")
-
+        
+        # Show actual table structure if possible
+        try:
+            tables_query = """
+            SELECT table_name, column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name IN ('email_group', 'email_relationships', 'conversation_analytics')
+            ORDER BY table_name, ordinal_position;
+            """
+            schema_df = pd.read_sql(tables_query, engine)
+            st.write("Current database schema:")
+            st.dataframe(schema_df)
+        except:
+            st.write("Could not retrieve database schema")
