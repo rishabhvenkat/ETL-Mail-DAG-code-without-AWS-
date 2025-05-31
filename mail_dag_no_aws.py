@@ -13,6 +13,8 @@ from typing import Dict, List, Any
 
 POSTGRES_CONN_ID = 'postgres_default'
 
+MAX_EMAILS_PER_FOLDER = 500  # Limit to avoid 504 errors
+
 default_args = {
     'owner': 'airflow',
     'start_date': datetime(2024, 1, 1),
@@ -89,15 +91,17 @@ with DAG(
             url = f"{graph_base}/users/{user_email}/mailFolders/{folder_id}/messages"
             url += "?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,flag,internetMessageId"
             url += "&$orderby=receivedDateTime desc"
-            while url:
+            while url and len(emails) < MAX_EMAILS_PER_FOLDER:
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
                     emails.extend(data.get("value", []))
+                    if len(emails) >= MAX_EMAILS_PER_FOLDER:
+                        break
                     url = data.get("@odata.nextLink", None)
                 else:
                     raise Exception(f"Error fetching emails: {response.status_code}, {response.text}")
-            return emails
+            return emails[:MAX_EMAILS_PER_FOLDER]
 
         all_emails = {}
         for folder_name in folder_names:
@@ -255,4 +259,3 @@ with DAG(
     raw_data = extract_emails_from_folders(token)
     analytics = analyze_email_responses(raw_data)
     load_to_postgres(analytics)
-
