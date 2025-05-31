@@ -96,7 +96,7 @@ with DAG(
             while url:
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
-                    data = response.json()
+                    data = response.json()['access_token']
                     emails.extend(data.get("value", []))
                     url = data.get("@odata.nextLink", None)
                 else:
