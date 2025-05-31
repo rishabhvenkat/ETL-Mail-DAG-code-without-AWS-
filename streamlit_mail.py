@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import json
 from typing import Dict, List, Tuple
 import numpy as np
@@ -68,12 +68,13 @@ def load_email_data():
 def process_email_data(emails_df, relationships_df, analytics_df):
     """Process and clean email data"""
     # Convert datetime columns
-    emails_df['received_datetime'] = pd.to_datetime(emails_df['received_datetime'], errors = 'coerce')
-    emails_df['sent_datetime'] = pd.to_datetime(emails_df['sent_datetime'], errors = 'coerce')
+    emails_df['received_datetime'] = pd.to_datetime(emails_df['received_datetime'], errors='coerce')
+    emails_df['sent_datetime'] = pd.to_datetime(emails_df['sent_datetime'], errors='coerce')
 
     # Drop rows where 'received_datetime' is missing (or handle differently if preferred)
     emails_df = emails_df[emails_df['received_datetime'].notna()].copy()
 
+    # Convert to proper date objects for Streamlit compatibility
     emails_df['date'] = emails_df['received_datetime'].dt.date
     emails_df['hour'] = emails_df['received_datetime'].dt.hour
     emails_df['weekday'] = emails_df['received_datetime'].dt.day_name()
@@ -274,22 +275,28 @@ def create_filters_sidebar(emails_df):
     """Create sidebar filters"""
     st.sidebar.header("Filters")
     
-    # Date range filter
-    min_date = emails_df['date'].min()
-    max_date = emails_df['date'].max()
+    # Date range filter - Fixed the date conversion logic
+    try:
+        # Get min and max dates and ensure they're proper date objects
+        date_series = pd.to_datetime(emails_df['date'])
+        min_date_dt = date_series.min()
+        max_date_dt = date_series.max()
+        
+        # Convert to Python date objects
+        if pd.notna(min_date_dt) and pd.notna(max_date_dt):
+            min_date = min_date_dt.date() if hasattr(min_date_dt, 'date') else date.today() - timedelta(days=30)
+            max_date = max_date_dt.date() if hasattr(max_date_dt, 'date') else date.today()
+        else:
+            # Fallback dates if conversion fails
+            min_date = date.today() - timedelta(days=30)
+            max_date = date.today()
+            
+    except Exception as e:
+        # Fallback to safe default dates
+        st.sidebar.warning(f"Date processing issue: {str(e)}. Using default date range.")
+        min_date = date.today() - timedelta(days=30)
+        max_date = date.today()
     
-    if isinstance(min_date, pd.Timestamp):
-        min_date = min_date.date()
-
-    if isinstance(min_date, np.datetime64):
-        min_date = pd.to_datetime(min_date).date()   
-    
-    if isinstance(max_date, pd.Timestamp):
-        max_date = max_date.date()
-
-    if isinstance(max_date, np.datetime64):
-        max_date = pd.to_datetime(max_date).date()
-
     date_range = st.sidebar.date_input(
         "Select Date Range",
         value=(min_date, max_date),
@@ -321,9 +328,11 @@ def apply_filters(emails_df, date_range, selected_folders, selected_importance):
     
     # Apply date filter
     if len(date_range) == 2:
+        # Ensure we're comparing date objects properly
+        start_date, end_date = date_range
         filtered_df = filtered_df[
-            (filtered_df['date'] >= date_range[0]) & 
-            (filtered_df['date'] <= date_range[1])
+            (pd.to_datetime(filtered_df['date']).dt.date >= start_date) & 
+            (pd.to_datetime(filtered_df['date']).dt.date <= end_date)
         ]
     
     # Apply folder filter
@@ -347,12 +356,22 @@ def main():
             emails_df_raw, relationships_df, analytics_df = load_email_data()
             merged_df, analytics_df = process_email_data(emails_df_raw, relationships_df, analytics_df)
         
+        # Check if we have data
+        if merged_df.empty:
+            st.error("No email data found. Please check your database.")
+            return
+            
         # Create filters
         date_range, selected_folders, selected_importance = create_filters_sidebar(merged_df)
         
         # Apply filters
         filtered_emails = apply_filters(merged_df, date_range, selected_folders, selected_importance)
         filtered_merged = merged_df[merged_df['email_id'].isin(filtered_emails['email_id'])]
+        
+        # Check if filtered data is empty
+        if filtered_emails.empty:
+            st.warning("No data matches the selected filters. Please adjust your filter criteria.")
+            return
         
         # Overview metrics
         create_overview_metrics(filtered_emails, analytics_df)
@@ -365,7 +384,7 @@ def main():
             create_incoming_analytics(filtered_emails, filtered_merged)
         
         with tab2:
-            create_response_analytics(merged_df, filtered_merged)
+            create_response_analytics(filtered_merged, analytics_df)
         
         with tab3:
             create_conversation_details(analytics_df, filtered_merged)
@@ -381,6 +400,9 @@ def main():
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         st.info("Please check your database connection and ensure the tables exist.")
+        # Show more detailed error information in development
+        if st.checkbox("Show detailed error (for debugging)"):
+            st.exception(e)
 
 if __name__ == "__main__":
     main()
