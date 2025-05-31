@@ -13,6 +13,52 @@ from typing import Dict, List, Any
 
 POSTGRES_CONN_ID = 'postgres_default'
 
+def create_tables_if_not_exist(pg_hook):
+    create_queries = [
+        '''
+        CREATE TABLE IF NOT EXISTS email_group (
+            id SERIAL PRIMARY KEY,
+            email_id TEXT,
+            folder TEXT,
+            subject TEXT,
+            sender TEXT,
+            recipients TEXT,
+            cc TEXT,
+            sent_time TIMESTAMP,
+            received_time TIMESTAMP
+        );
+        ''',
+        '''
+        CREATE TABLE IF NOT EXISTS email_relationships (
+            email_id TEXT PRIMARY KEY,
+            conversation_id TEXT,
+            is_response BOOLEAN,
+            is_from_user BOOLEAN,
+            original_email_id TEXT,
+            response_time_hours FLOAT,
+            position_in_thread INTEGER,
+            thread_length INTEGER
+        );
+        ''',
+        '''
+        CREATE TABLE IF NOT EXISTS conversation_analytics (
+            conversation_id TEXT PRIMARY KEY,
+            total_emails INTEGER,
+            user_emails_count INTEGER,
+            external_emails_count INTEGER,
+            user_response_count INTEGER,
+            response_rate_percent FLOAT,
+            conversation_start_date DATE,
+            last_activity_date DATE
+        );
+        '''
+    ]
+    with pg_hook.get_conn() as conn:
+        with conn.cursor() as cursor:
+            for query in create_queries:
+                cursor.execute(query)
+        conn.commit()
+
 default_args = {
     'owner': 'airflow',
     'start_date': datetime(2024, 1, 1),
@@ -74,7 +120,6 @@ with DAG(
                 else:
                     raise Exception(f"Error fetching {folder_name}: {response.status_code}, {response.text}")
 
-            # Search in child folders
             child_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox/childFolders"
             response = requests.get(child_url, headers=headers)
             if response.status_code != 200:
@@ -197,7 +242,37 @@ with DAG(
 
     @task()
     def load_to_postgres(data):
-        pass  # Assume load logic is implemented below...
+        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        create_tables_if_not_exist(pg_hook)
+
+        with pg_hook.get_conn() as conn:
+            with conn.cursor() as cursor:
+                for folder, emails in data["emails_by_folder"].items():
+                    for email in emails:
+                        cursor.execute('''
+                            INSERT INTO email_group (email_id, folder, subject, sender, recipients, cc, sent_time, received_time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (email_id) DO NOTHING;
+                        ''', (
+                            email.get("id"), folder, email.get("subject"),
+                            email.get("from", {}).get("emailAddress", {}).get("address"),
+                            json.dumps([r["emailAddress"]["address"] for r in email.get("toRecipients", [])]),
+                            json.dumps([c["emailAddress"]["address"] for c in email.get("ccRecipients", [])]),
+                            email.get("sentDateTime"), email.get("receivedDateTime")
+                        ))
+                for rel in data["email_relationships"]:
+                    cursor.execute('''
+                        INSERT INTO email_relationships (email_id, conversation_id, is_response, is_from_user, original_email_id, response_time_hours, position_in_thread, thread_length)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (email_id) DO NOTHING;
+                    ''', tuple(rel.values()))
+                for row in data["conversation_analytics"]:
+                    cursor.execute('''
+                        INSERT INTO conversation_analytics (conversation_id, total_emails, user_emails_count, external_emails_count, user_response_count, response_rate_percent, conversation_start_date, last_activity_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (conversation_id) DO NOTHING;
+                    ''', tuple(row.values()))
+        conn.commit()
 
     token = get_graph_token()
     raw_data = extract_emails_from_folders(token)
