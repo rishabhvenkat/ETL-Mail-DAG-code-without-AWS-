@@ -32,7 +32,7 @@ with DAG(
 
     @task()
     def create_tables():
-        """Create required tables if they don't exist"""
+        """Create required tables and add missing columns if they don't exist"""
         pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
@@ -57,6 +57,31 @@ with DAG(
             );
         """)
         
+        # Add missing columns to existing table if they don't exist
+        try:
+            cursor.execute("ALTER TABLE email_group ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(255);")
+            logging.info("Added conversation_id column to email_group table")
+        except Exception as e:
+            logging.info(f"conversation_id column handling: {str(e)}")
+        
+        try:
+            cursor.execute("ALTER TABLE email_group ADD COLUMN IF NOT EXISTS from_address VARCHAR(255);")
+            logging.info("Added from_address column to email_group table")
+        except Exception as e:
+            logging.info(f"from_address column handling: {str(e)}")
+        
+        try:
+            cursor.execute("ALTER TABLE email_group ADD COLUMN IF NOT EXISTS folder VARCHAR(100);")
+            logging.info("Added folder column to email_group table")
+        except Exception as e:
+            logging.info(f"folder column handling: {str(e)}")
+        
+        try:
+            cursor.execute("ALTER TABLE email_group ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
+            logging.info("Added created_at column to email_group table")
+        except Exception as e:
+            logging.info(f"created_at column handling: {str(e)}")
+        
         # Create email_relationships table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS email_relationships (
@@ -68,8 +93,7 @@ with DAG(
                 response_time_hours NUMERIC,
                 position_in_thread INTEGER,
                 thread_length INTEGER,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (email_id) REFERENCES email_group(email_id) ON DELETE CASCADE
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
         
@@ -89,16 +113,19 @@ with DAG(
             );
         """)
         
-        # Create indexes for better performance
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_conversation_id ON email_group(conversation_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_folder ON email_group(folder);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_received_datetime ON email_group(received_datetime);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_relationships_conversation_id ON email_relationships(conversation_id);")
+        # Create indexes for better performance (with error handling)
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_conversation_id ON email_group(conversation_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_folder ON email_group(folder);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_received_datetime ON email_group(received_datetime);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_relationships_conversation_id ON email_relationships(conversation_id);")
+        except Exception as e:
+            logging.warning(f"Index creation warning: {str(e)}")
         
         conn.commit()
         cursor.close()
         conn.close()
-        logging.info("Tables created successfully")
+        logging.info("Tables and schema migration completed successfully")
 
     @task()
     def get_graph_token():
