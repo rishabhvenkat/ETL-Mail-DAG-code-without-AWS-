@@ -31,6 +31,76 @@ with DAG(
 ) as dag:
 
     @task()
+    def create_tables():
+        """Create required tables if they don't exist"""
+        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = pg_hook.get_conn()
+        cursor = conn.cursor()
+        
+        # Create email_group table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_group (
+                email_id VARCHAR(255) PRIMARY KEY,
+                conversation_id VARCHAR(255),
+                subject TEXT,
+                from_address VARCHAR(255),
+                to_recipients JSONB,
+                cc_recipients JSONB,
+                received_datetime TIMESTAMP WITH TIME ZONE,
+                sent_datetime TIMESTAMP WITH TIME ZONE,
+                is_read BOOLEAN,
+                has_attachments BOOLEAN,
+                importance VARCHAR(50),
+                folder VARCHAR(100),
+                internet_message_id VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Create email_relationships table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_relationships (
+                email_id VARCHAR(255) PRIMARY KEY,
+                conversation_id VARCHAR(255),
+                is_response BOOLEAN,
+                is_from_user BOOLEAN,
+                original_email_id VARCHAR(255),
+                response_time_hours NUMERIC,
+                position_in_thread INTEGER,
+                thread_length INTEGER,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (email_id) REFERENCES email_group(email_id) ON DELETE CASCADE
+            );
+        """)
+        
+        # Create conversation_analytics table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_analytics (
+                conversation_id VARCHAR(255) PRIMARY KEY,
+                total_emails INTEGER,
+                user_emails_count INTEGER,
+                external_emails_count INTEGER,
+                user_response_count INTEGER,
+                response_rate_percent NUMERIC(5,2),
+                conversation_start_date DATE,
+                last_activity_date DATE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Create indexes for better performance
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_conversation_id ON email_group(conversation_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_folder ON email_group(folder);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_group_received_datetime ON email_group(received_datetime);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_relationships_conversation_id ON email_relationships(conversation_id);")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logging.info("Tables created successfully")
+
+    @task()
     def get_graph_token():
         tenant_id = os.environ.get("MS_GRAPH_TENANT_ID")
         client_id = os.environ.get("MS_GRAPH_CLIENT_ID")
@@ -208,54 +278,102 @@ with DAG(
         relationships = data['email_relationships']
         analytics = data['conversation_analytics']
 
+        # Insert emails with proper error handling
         for folder, email_list in emails.items():
             for email in email_list:
-                cursor.execute("""
-                    INSERT INTO email_group (email_id, conversation_id, subject, from_address, to_recipients, cc_recipients, received_datetime, sent_datetime, is_read, has_attachments, importance, folder, internet_message_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (email_id) DO NOTHING;
-                """, (
-                    email.get('id'),
-                    email.get('conversationId'),
-                    email.get('subject'),
-                    email.get('from', {}).get('emailAddress', {}).get('address', ''),
-                    json.dumps([r['emailAddress']['address'] for r in email.get('toRecipients', [])]),
-                    json.dumps([r['emailAddress']['address'] for r in email.get('ccRecipients', [])]),
-                    email.get('receivedDateTime'),
-                    email.get('sentDateTime'),
-                    email.get('isRead'),
-                    email.get('hasAttachments'),
-                    email.get('importance'),
-                    email.get('folder'),
-                    email.get('internetMessageId')
-                ))
+                try:
+                    cursor.execute("""
+                        INSERT INTO email_group (email_id, conversation_id, subject, from_address, to_recipients, cc_recipients, received_datetime, sent_datetime, is_read, has_attachments, importance, folder, internet_message_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (email_id) DO UPDATE SET
+                            conversation_id = EXCLUDED.conversation_id,
+                            subject = EXCLUDED.subject,
+                            from_address = EXCLUDED.from_address,
+                            to_recipients = EXCLUDED.to_recipients,
+                            cc_recipients = EXCLUDED.cc_recipients,
+                            received_datetime = EXCLUDED.received_datetime,
+                            sent_datetime = EXCLUDED.sent_datetime,
+                            is_read = EXCLUDED.is_read,
+                            has_attachments = EXCLUDED.has_attachments,
+                            importance = EXCLUDED.importance,
+                            folder = EXCLUDED.folder,
+                            internet_message_id = EXCLUDED.internet_message_id;
+                    """, (
+                        email.get('id'),
+                        email.get('conversationId'),
+                        email.get('subject'),
+                        email.get('from', {}).get('emailAddress', {}).get('address', ''),
+                        json.dumps([r['emailAddress']['address'] for r in email.get('toRecipients', [])]),
+                        json.dumps([r['emailAddress']['address'] for r in email.get('ccRecipients', [])]),
+                        email.get('receivedDateTime'),
+                        email.get('sentDateTime'),
+                        email.get('isRead'),
+                        email.get('hasAttachments'),
+                        email.get('importance'),
+                        email.get('folder'),
+                        email.get('internetMessageId')
+                    ))
+                except Exception as e:
+                    logging.error(f"Error inserting email {email.get('id', 'unknown')}: {str(e)}")
+                    continue
 
+        # Insert relationships
         for rel in relationships:
-            cursor.execute("""
-                INSERT INTO email_relationships (email_id, conversation_id, is_response, is_from_user, original_email_id, response_time_hours, position_in_thread, thread_length)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (email_id) DO NOTHING;
-            """, (
-                rel['email_id'], rel['conversation_id'], rel['is_response'], rel['is_from_user'],
-                rel['original_email_id'], rel['response_time_hours'], rel['position_in_thread'], rel['thread_length']
-            ))
+            try:
+                cursor.execute("""
+                    INSERT INTO email_relationships (email_id, conversation_id, is_response, is_from_user, original_email_id, response_time_hours, position_in_thread, thread_length)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (email_id) DO UPDATE SET
+                        conversation_id = EXCLUDED.conversation_id,
+                        is_response = EXCLUDED.is_response,
+                        is_from_user = EXCLUDED.is_from_user,
+                        original_email_id = EXCLUDED.original_email_id,
+                        response_time_hours = EXCLUDED.response_time_hours,
+                        position_in_thread = EXCLUDED.position_in_thread,
+                        thread_length = EXCLUDED.thread_length;
+                """, (
+                    rel['email_id'], rel['conversation_id'], rel['is_response'], rel['is_from_user'],
+                    rel['original_email_id'], rel['response_time_hours'], rel['position_in_thread'], rel['thread_length']
+                ))
+            except Exception as e:
+                logging.error(f"Error inserting relationship for email {rel.get('email_id', 'unknown')}: {str(e)}")
+                continue
 
+        # Insert analytics with upsert
         for metric in analytics:
-            cursor.execute("""
-                INSERT INTO conversation_analytics (conversation_id, total_emails, user_emails_count, external_emails_count, user_response_count, response_rate_percent, conversation_start_date, last_activity_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (conversation_id) DO NOTHING;
-            """, (
-                metric['conversation_id'], metric['total_emails'], metric['user_emails_count'],
-                metric['external_emails_count'], metric['user_response_count'],
-                metric['response_rate_percent'], metric['conversation_start_date'], metric['last_activity_date']
-            ))
+            try:
+                cursor.execute("""
+                    INSERT INTO conversation_analytics (conversation_id, total_emails, user_emails_count, external_emails_count, user_response_count, response_rate_percent, conversation_start_date, last_activity_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (conversation_id) DO UPDATE SET
+                        total_emails = EXCLUDED.total_emails,
+                        user_emails_count = EXCLUDED.user_emails_count,
+                        external_emails_count = EXCLUDED.external_emails_count,
+                        user_response_count = EXCLUDED.user_response_count,
+                        response_rate_percent = EXCLUDED.response_rate_percent,
+                        conversation_start_date = EXCLUDED.conversation_start_date,
+                        last_activity_date = EXCLUDED.last_activity_date,
+                        updated_at = CURRENT_TIMESTAMP;
+                """, (
+                    metric['conversation_id'], metric['total_emails'], metric['user_emails_count'],
+                    metric['external_emails_count'], metric['user_response_count'],
+                    metric['response_rate_percent'], metric['conversation_start_date'], metric['last_activity_date']
+                ))
+            except Exception as e:
+                logging.error(f"Error inserting analytics for conversation {metric.get('conversation_id', 'unknown')}: {str(e)}")
+                continue
 
         conn.commit()
         cursor.close()
         conn.close()
+        logging.info("Data loaded to PostgreSQL successfully")
 
+    # Define task dependencies
+    tables = create_tables()
     token = get_graph_token()
     raw_data = extract_emails_from_folders(token)
     analytics = analyze_email_responses(raw_data)
-    load_to_postgres(analytics)
+    load_data = load_to_postgres(analytics)
+    
+    # Set up dependencies
+    tables >> token >> raw_data >> analytics >> load_data
