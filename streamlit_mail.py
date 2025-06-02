@@ -67,12 +67,24 @@ def load_email_data():
 
 def process_email_data(emails_df, relationships_df, analytics_df):
     """Process and clean email data"""
+    if emails_df.empty:
+        return pd.DataFrame(), analytics_df
+    
     # Convert datetime columns
     emails_df['received_datetime'] = pd.to_datetime(emails_df['received_datetime'], errors='coerce')
     emails_df['sent_datetime'] = pd.to_datetime(emails_df['sent_datetime'], errors='coerce')
 
+    # Log how many rows have missing datetime before filtering
+    missing_datetime = emails_df['received_datetime'].isna().sum()
+    if missing_datetime > 0:
+        st.warning(f"Found {missing_datetime} emails with missing received_datetime - these will be filtered out")
+
     # Drop rows where 'received_datetime' is missing (or handle differently if preferred)
     emails_df = emails_df[emails_df['received_datetime'].notna()].copy()
+
+    if emails_df.empty:
+        st.error("All emails were filtered out due to missing received_datetime")
+        return pd.DataFrame(), analytics_df
 
     # Convert to proper date objects for Streamlit compatibility
     emails_df['date'] = emails_df['received_datetime'].dt.date
@@ -101,11 +113,11 @@ def create_overview_metrics(emails_df, analytics_df):
         st.metric("Total Emails", f"{total_emails:,}")
     
     with col2:
-        total_conversations = analytics_df['conversation_id'].nunique()
+        total_conversations = analytics_df['conversation_id'].nunique() if not analytics_df.empty else 0
         st.metric("Total Conversations", f"{total_conversations:,}")
     
     with col3:
-        avg_response_rate = analytics_df['response_rate_percent'].mean()
+        avg_response_rate = analytics_df['response_rate_percent'].mean() if not analytics_df.empty else 0
         st.metric("Avg Response Rate", f"{avg_response_rate:.1f}%")
     
     with col4:
@@ -198,13 +210,16 @@ def create_response_analytics(merged_df, analytics_df):
     
     with col2:
         # Response rate distribution
-        fig_response_rate = px.histogram(
-            analytics_df, x='response_rate_percent',
-            title='Response Rate Distribution',
-            labels={'response_rate_percent': 'Response Rate (%)', 'count': 'Frequency'},
-            nbins=20
-        )
-        st.plotly_chart(fig_response_rate, use_container_width=True)
+        if not analytics_df.empty:
+            fig_response_rate = px.histogram(
+                analytics_df, x='response_rate_percent',
+                title='Response Rate Distribution',
+                labels={'response_rate_percent': 'Response Rate (%)', 'count': 'Frequency'},
+                nbins=20
+            )
+            st.plotly_chart(fig_response_rate, use_container_width=True)
+        else:
+            st.info("No analytics data available")
     
     # Thread length analysis
     st.subheader("Conversation Thread Analysis")
@@ -212,33 +227,43 @@ def create_response_analytics(merged_df, analytics_df):
     
     with col3:
         # Thread length distribution
-        thread_lengths = analytics_df['total_emails'].value_counts().sort_index()
-        fig_threads = px.bar(
-            x=thread_lengths.index, y=thread_lengths.values,
-            title='Thread Length Distribution',
-            labels={'x': 'Number of Emails in Thread', 'y': 'Number of Conversations'}
-        )
-        st.plotly_chart(fig_threads, use_container_width=True)
+        if not analytics_df.empty:
+            thread_lengths = analytics_df['total_emails'].value_counts().sort_index()
+            fig_threads = px.bar(
+                x=thread_lengths.index, y=thread_lengths.values,
+                title='Thread Length Distribution',
+                labels={'x': 'Number of Emails in Thread', 'y': 'Number of Conversations'}
+            )
+            st.plotly_chart(fig_threads, use_container_width=True)
+        else:
+            st.info("No thread data available")
     
     with col4:
         # User vs External emails in conversations
-        fig_user_external = px.scatter(
-            analytics_df, 
-            x='user_emails_count', 
-            y='external_emails_count',
-            size='total_emails',
-            hover_data=['response_rate_percent'],
-            title='User vs External Emails in Conversations',
-            labels={
-                'user_emails_count': 'User Emails Count',
-                'external_emails_count': 'External Emails Count'
-            }
-        )
-        st.plotly_chart(fig_user_external, use_container_width=True)
+        if not analytics_df.empty:
+            fig_user_external = px.scatter(
+                analytics_df, 
+                x='user_emails_count', 
+                y='external_emails_count',
+                size='total_emails',
+                hover_data=['response_rate_percent'],
+                title='User vs External Emails in Conversations',
+                labels={
+                    'user_emails_count': 'User Emails Count',
+                    'external_emails_count': 'External Emails Count'
+                }
+            )
+            st.plotly_chart(fig_user_external, use_container_width=True)
+        else:
+            st.info("No conversation data available")
 
 def create_conversation_details(analytics_df, merged_df):
     """Create detailed conversation analysis"""
     st.header("💬 Conversation Details")
+    
+    if analytics_df.empty:
+        st.info("No conversation analytics data available")
+        return
     
     # Conversation summary table
     st.subheader("Top Conversations by Activity")
@@ -274,6 +299,10 @@ def create_conversation_details(analytics_df, merged_df):
 def create_filters_sidebar(emails_df):
     """Create sidebar filters"""
     st.sidebar.header("Filters")
+    
+    if emails_df.empty:
+        st.sidebar.info("No data available for filtering")
+        return None, [], []
     
     # Date range filter - Fixed the date conversion logic
     try:
@@ -324,10 +353,13 @@ def create_filters_sidebar(emails_df):
 
 def apply_filters(emails_df, date_range, selected_folders, selected_importance):
     """Apply filters to the dataframe"""
+    if emails_df.empty:
+        return emails_df
+        
     filtered_df = emails_df.copy()
     
     # Apply date filter
-    if len(date_range) == 2:
+    if date_range and len(date_range) == 2:
         # Ensure we're comparing date objects properly
         start_date, end_date = date_range
         filtered_df = filtered_df[
@@ -354,11 +386,49 @@ def main():
     try:
         with st.spinner("Loading email data..."):
             emails_df_raw, relationships_df, analytics_df = load_email_data()
+            
+            # Debug information - Show what was loaded from database
+            st.info("📊 **Data Loading Summary:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Raw Emails Loaded", len(emails_df_raw))
+            with col2:
+                st.metric("Relationships Loaded", len(relationships_df))
+            with col3:
+                st.metric("Analytics Loaded", len(analytics_df))
+            
+            # Show sample data if available
+            if not emails_df_raw.empty:
+                with st.expander("🔍 Sample Raw Email Data (First 5 rows)"):
+                    st.dataframe(emails_df_raw[['email_id', 'subject', 'from_address', 'received_datetime', 'folder']].head())
+            else:
+                st.error("❌ No emails found in email_group table!")
+                st.info("**Troubleshooting steps:**")
+                st.write("1. Check if your Airflow DAG ran successfully")
+                st.write("2. Verify data exists: `SELECT COUNT(*) FROM email_group;`")
+                st.write("3. Check database connection settings")
+                return
+            
+            if not relationships_df.empty:
+                with st.expander("🔗 Sample Relationships Data"):
+                    st.dataframe(relationships_df.head())
+            else:
+                st.warning("⚠️ No data in email_relationships table")
+                
+            if not analytics_df.empty:
+                with st.expander("📈 Sample Analytics Data"):
+                    st.dataframe(analytics_df.head())
+            else:
+                st.warning("⚠️ No data in conversation_analytics table")
+            
+            # Process the data
             merged_df, analytics_df = process_email_data(emails_df_raw, relationships_df, analytics_df)
+            
+            st.metric("Processed Emails (after filtering)", len(merged_df))
         
-        # Check if we have data
+        # Check if we have data after processing
         if merged_df.empty:
-            st.error("No email data found. Please check your database.")
+            st.error("❌ No email data found after processing. Please check your database.")
             return
             
         # Create filters
@@ -370,8 +440,11 @@ def main():
         
         # Check if filtered data is empty
         if filtered_emails.empty:
-            st.warning("No data matches the selected filters. Please adjust your filter criteria.")
+            st.warning("⚠️ No data matches the selected filters. Please adjust your filter criteria.")
             return
+        
+        st.success(f"✅ Dashboard ready with {len(filtered_emails)} emails!")
+        st.markdown("---")
         
         # Overview metrics
         create_overview_metrics(filtered_emails, analytics_df)
@@ -394,14 +467,19 @@ def main():
             st.subheader("Email Data")
             st.dataframe(filtered_emails.head(100), use_container_width=True)
             
-            st.subheader("Analytics Data")
-            st.dataframe(analytics_df.head(50), use_container_width=True)
+            if not analytics_df.empty:
+                st.subheader("Analytics Data")
+                st.dataframe(analytics_df.head(50), use_container_width=True)
     
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.info("Please check your database connection and ensure the tables exist.")
-        # Show more detailed error information in development
-        if st.checkbox("Show detailed error (for debugging)"):
+        st.error(f"❌ Error loading data: {str(e)}")
+        st.info("**Please check:**")
+        st.write("- Database connection settings")
+        st.write("- Table existence (email_group, email_relationships, conversation_analytics)")
+        st.write("- Airflow DAG execution status")
+        
+        # Show more detailed error information
+        if st.checkbox("🐛 Show detailed error (for debugging)"):
             st.exception(e)
 
 if __name__ == "__main__":
