@@ -12,6 +12,10 @@ import logging
 from typing import Dict, List, Any
 import traceback
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 POSTGRES_CONN_ID = 'postgres_default'
 
 default_args = {
@@ -22,29 +26,88 @@ default_args = {
 }
 
 with DAG(
-    dag_id='ms_graph_email_etl_postgres_with_analytics',
+    dag_id='ms_graph_email_etl_postgres_with_analytics_debug',
     default_args=default_args,
     schedule='@daily',
     catchup=False,
-    tags=['email', 'graph', 'etl', 'postgres', 'analytics']
+    tags=['email', 'graph', 'etl', 'postgres', 'analytics', 'debug']
 ) as dag:
+
+    @task()
+    def test_connections():
+        """Test all connections and prerequisites"""
+        try:
+            logger.info("=== STARTING CONNECTION TESTS ===")
+            
+            # Test PostgreSQL connection
+            logger.info("Testing PostgreSQL connection...")
+            try:
+                pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+                conn = pg_hook.get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT version();")
+                result = cursor.fetchone()
+                logger.info(f"✅ PostgreSQL connection successful: {result[0]}")
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"❌ PostgreSQL connection failed: {str(e)}")
+                raise
+            
+            # Test environment variables
+            logger.info("Testing MS Graph environment variables...")
+            required_env_vars = ["MS_GRAPH_TENANT_ID", "MS_GRAPH_CLIENT_ID", "MS_GRAPH_CLIENT_SECRET"]
+            for var in required_env_vars:
+                value = os.environ.get(var)
+                if value:
+                    logger.info(f"✅ {var}: {'*' * min(len(value), 10)}...")
+                else:
+                    logger.error(f"❌ {var}: NOT SET")
+                    raise ValueError(f"Missing environment variable: {var}")
+            
+            # Test Airflow variables
+            logger.info("Testing Airflow variables...")
+            try:
+                user_email = Variable.get("MS_GRAPH_USER_EMAIL")
+                logger.info(f"✅ MS_GRAPH_USER_EMAIL: {user_email}")
+            except Exception as e:
+                logger.error(f"❌ MS_GRAPH_USER_EMAIL variable not set: {str(e)}")
+                raise
+                
+            try:
+                folder_names = Variable.get("MS_GRAPH_FOLDER_NAMES", default='["Inbox", "Sent Items"]')
+                folders = json.loads(folder_names)
+                logger.info(f"✅ MS_GRAPH_FOLDER_NAMES: {folders}")
+            except Exception as e:
+                logger.error(f"❌ MS_GRAPH_FOLDER_NAMES variable issue: {str(e)}")
+                raise
+            
+            logger.info("=== ALL CONNECTION TESTS PASSED ===")
+            return {"status": "success", "message": "All connections tested successfully"}
+            
+        except Exception as e:
+            logger.error(f"=== CONNECTION TEST FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
     @task()
     def create_tables():
         """Create required tables and add missing columns if they don't exist"""
         try:
-            pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+            logger.info("=== STARTING TABLE CREATION ===")
             
-            # Test connection first
-            logging.info("Testing PostgreSQL connection...")
+            pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
             conn = pg_hook.get_conn()
             cursor = conn.cursor()
+            
+            # Test connection
             cursor.execute("SELECT 1;")
             result = cursor.fetchone()
-            logging.info(f"Connection test successful: {result}")
+            logger.info(f"✅ Connection test successful: {result}")
             
             # Create email_group table
-            logging.info("Creating email_group table...")
+            logger.info("Creating email_group table...")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS email_group (
                     email_id VARCHAR(255) PRIMARY KEY,
@@ -63,24 +126,10 @@ with DAG(
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            
-            # Add missing columns to existing table if they don't exist
-            columns_to_add = [
-                ("conversation_id", "VARCHAR(255)"),
-                ("from_address", "VARCHAR(255)"),
-                ("folder", "VARCHAR(100)"),
-                ("created_at", "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP")
-            ]
-            
-            for column_name, column_type in columns_to_add:
-                try:
-                    cursor.execute(f"ALTER TABLE email_group ADD COLUMN IF NOT EXISTS {column_name} {column_type};")
-                    logging.info(f"Added {column_name} column to email_group table")
-                except Exception as e:
-                    logging.info(f"{column_name} column handling: {str(e)}")
+            logger.info("✅ email_group table created/verified")
             
             # Create email_relationships table
-            logging.info("Creating email_relationships table...")
+            logger.info("Creating email_relationships table...")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS email_relationships (
                     email_id VARCHAR(255) PRIMARY KEY,
@@ -94,9 +143,10 @@ with DAG(
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            logger.info("✅ email_relationships table created/verified")
             
             # Create conversation_analytics table
-            logging.info("Creating conversation_analytics table...")
+            logger.info("Creating conversation_analytics table...")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS conversation_analytics (
                     conversation_id VARCHAR(255) PRIMARY KEY,
@@ -111,28 +161,17 @@ with DAG(
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            
-            # Create indexes for better performance
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_email_group_conversation_id ON email_group(conversation_id);",
-                "CREATE INDEX IF NOT EXISTS idx_email_group_folder ON email_group(folder);",
-                "CREATE INDEX IF NOT EXISTS idx_email_group_received_datetime ON email_group(received_datetime);",
-                "CREATE INDEX IF NOT EXISTS idx_email_relationships_conversation_id ON email_relationships(conversation_id);"
-            ]
-            
-            for index_sql in indexes:
-                try:
-                    cursor.execute(index_sql)
-                    logging.info(f"Created index: {index_sql}")
-                except Exception as e:
-                    logging.warning(f"Index creation warning: {str(e)}")
+            logger.info("✅ conversation_analytics table created/verified")
             
             conn.commit()
-            logging.info("Tables and schema migration completed successfully")
+            logger.info("=== TABLE CREATION COMPLETED SUCCESSFULLY ===")
+            
+            return {"status": "success", "message": "Tables created successfully"}
             
         except Exception as e:
-            logging.error(f"Error in create_tables: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"=== TABLE CREATION FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
         finally:
             try:
@@ -140,18 +179,21 @@ with DAG(
                     cursor.close()
                 if 'conn' in locals():
                     conn.close()
+                logger.info("Database connections closed")
             except:
                 pass
 
     @task()
     def get_graph_token():
         try:
+            logger.info("=== STARTING TOKEN ACQUISITION ===")
+            
             tenant_id = os.environ.get("MS_GRAPH_TENANT_ID")
             client_id = os.environ.get("MS_GRAPH_CLIENT_ID")
             client_secret = os.environ.get("MS_GRAPH_CLIENT_SECRET")
 
             if not all([tenant_id, client_id, client_secret]):
-                raise ValueError("Missing required environment variables: MS_GRAPH_TENANT_ID, MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET")
+                raise ValueError("Missing required environment variables")
 
             url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -162,112 +204,80 @@ with DAG(
                 "scope": "https://graph.microsoft.com/.default"
             }
 
+            logger.info(f"Making token request to: {url}")
             response = requests.post(url, headers=headers, data=data)
+            
             if response.status_code == 200:
+                logger.info("✅ Token acquired successfully")
                 return response.json()['access_token']
             else:
+                logger.error(f"❌ Token acquisition failed: {response.status_code} - {response.text}")
                 raise Exception(f"Failed to get token: {response.status_code} - {response.text}")
+                
         except Exception as e:
-            logging.error(f"Error in get_graph_token: {str(e)}")
+            logger.error(f"=== TOKEN ACQUISITION FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     @task()
-    def extract_emails_from_folders(access_token: str):
+    def extract_limited_emails(access_token: str):
+        """Extract a limited number of emails for testing"""
         try:
+            logger.info("=== STARTING LIMITED EMAIL EXTRACTION ===")
+            
             graph_base = "https://graph.microsoft.com/v1.0"
             user_email = Variable.get("MS_GRAPH_USER_EMAIL")
-            folder_names = json.loads(Variable.get("MS_GRAPH_FOLDER_NAMES", default='["Inbox", "Sent Items"]'))
-
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json"
             }
 
-            def get_folder_id(folder_name):
-                special_folders = {
-                    "inbox": "Inbox",
-                    "sent items": "SentItems"
-                }
-                lower_name = folder_name.strip().lower()
-                if lower_name in special_folders:
-                    url = f"{graph_base}/users/{user_email}/mailFolders/{special_folders[lower_name]}"
-                    response = requests.get(url, headers=headers)
-                    if response.status_code == 200:
-                        return response.json()["id"]
-                    else:
-                        raise Exception(f"Error fetching {folder_name}: {response.status_code}, {response.text}")
-
-                child_url = f"{graph_base}/users/{user_email}/mailFolders/Inbox/childFolders"
-                response = requests.get(child_url, headers=headers)
-                if response.status_code != 200:
-                    raise Exception(f"Error fetching child folders: {response.status_code}, {response.text}")
-
-                for folder in response.json().get("value", []):
-                    if folder["displayName"].strip().lower() == lower_name:
-                        return folder["id"]
-                raise Exception(f"Folder '{folder_name}' not found.")
-
-            def fetch_all_emails(folder_id, folder_name):
-                """Fetch all emails from a folder without limit"""
-                emails = []
-                url = f"{graph_base}/users/{user_email}/mailFolders/{folder_id}/messages"
-                url += "?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,flag,internetMessageId"
-                url += "&$orderby=receivedDateTime desc"
-                
-                page_count = 0
-                while url:
-                    page_count += 1
-                    logging.info(f"Fetching page {page_count} from folder '{folder_name}' (Current total: {len(emails)} emails)")
-                    
-                    response = requests.get(url, headers=headers)
-                    if response.status_code == 200:
-                        data = response.json()
-                        page_emails = data.get("value", [])
-                        emails.extend(page_emails)
-                        
-                        if page_count % 10 == 0:
-                            logging.info(f"Processed {page_count} pages from folder '{folder_name}', fetched {len(emails)} emails so far")
-                        
-                        url = data.get("@odata.nextLink", None)
-                        
-                        if not url:
-                            break
-                            
-                    else:
-                        raise Exception(f"Error fetching emails from {folder_name} (page {page_count}): {response.status_code}, {response.text}")
-                
-                logging.info(f"Successfully fetched {len(emails)} emails from folder '{folder_name}' in {page_count} pages")
-                return emails
-
-            all_emails = {}
-            total_emails_count = 0
+            # Just get Inbox for testing
+            url = f"{graph_base}/users/{user_email}/mailFolders/Inbox/messages"
+            url += "?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,hasAttachments,importance,internetMessageId"
+            url += "&$top=10"  # Limit to 10 emails for testing
             
-            for folder_name in folder_names:
-                logging.info(f"Starting extraction from folder: {folder_name}")
-                folder_id = get_folder_id(folder_name)
-                emails = fetch_all_emails(folder_id, folder_name)
-                all_emails[folder_name] = emails
-                total_emails_count += len(emails)
-                logging.info(f"Completed extraction from folder '{folder_name}': {len(emails)} emails")
-
-            logging.info(f"Total emails extracted from all folders: {total_emails_count}")
-            return {"emails_by_folder": all_emails, "user_email": user_email, "total_count": total_emails_count}
-        
+            logger.info(f"Making request to: {url}")
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                data = response.json()
+                emails = data.get("value", [])
+                logger.info(f"✅ Successfully extracted {len(emails)} emails for testing")
+                
+                # Log sample email structure
+                if emails:
+                    sample_email = emails[0]
+                    logger.info(f"Sample email structure: {list(sample_email.keys())}")
+                
+                return {
+                    "emails_by_folder": {"Inbox": emails},
+                    "user_email": user_email,
+                    "total_count": len(emails)
+                }
+            else:
+                logger.error(f"❌ Email extraction failed: {response.status_code} - {response.text}")
+                raise Exception(f"Failed to extract emails: {response.status_code} - {response.text}")
+                
         except Exception as e:
-            logging.error(f"Error in extract_emails_from_folders: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"=== EMAIL EXTRACTION FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     @task()
     def analyze_email_responses(data):
         try:
-            from datetime import datetime
-
+            logger.info("=== STARTING EMAIL ANALYSIS ===")
+            logger.info(f"Input data keys: {list(data.keys())}")
+            
             all_emails = data.get("emails_by_folder", {})
             user_email = data.get("user_email", "")
             total_count = data.get("total_count", 0)
 
-            logging.info(f"Starting analysis of {total_count} emails")
+            logger.info(f"Analyzing {total_count} emails")
 
             all_email_list = []
             for folder, emails in all_emails.items():
@@ -275,78 +285,48 @@ with DAG(
                     email['folder'] = folder
                     all_email_list.append(email)
 
-            logging.info(f"Analyzing {len(all_email_list)} emails across {len(all_emails)} folders")
+            logger.info(f"Processing {len(all_email_list)} emails")
 
+            # Simple analysis for testing
+            email_relationships = []
+            conversation_analytics = []
+            
             conversations = {}
             for email in all_email_list:
                 conv_id = email.get('conversationId')
                 if conv_id:
                     conversations.setdefault(conv_id, []).append(email)
 
-            logging.info(f"Found {len(conversations)} unique conversations")
-
-            email_relationships = []
-            conversation_analytics = []
+            logger.info(f"Found {len(conversations)} conversations")
 
             for conv_id, emails in conversations.items():
-                emails_sorted = sorted(emails, key=lambda x: x.get('receivedDateTime', x.get('sentDateTime', '')))
-
-                for i, email in enumerate(emails_sorted):
+                for i, email in enumerate(emails):
                     from_email = email.get('from', {}).get('emailAddress', {}).get('address', '')
                     is_from_user = from_email.lower() == user_email.lower()
-
-                    response_time = None
-                    original_email_id = None
-                    if i > 0:
-                        original_email = emails_sorted[i - 1]
-                        original_email_id = original_email.get('id')
-                        try:
-                            t1 = datetime.fromisoformat(email.get('receivedDateTime', '').replace('Z', '+00:00'))
-                            t0 = datetime.fromisoformat(original_email.get('receivedDateTime', '').replace('Z', '+00:00'))
-                            response_time = (t1 - t0).total_seconds() / 3600
-                        except:
-                            pass
 
                     email_relationships.append({
                         'email_id': email.get('id'),
                         'conversation_id': conv_id,
                         'is_response': i > 0,
                         'is_from_user': is_from_user,
-                        'original_email_id': original_email_id,
-                        'response_time_hours': response_time,
+                        'original_email_id': None,
+                        'response_time_hours': None,
                         'position_in_thread': i + 1,
-                        'thread_length': len(emails_sorted)
+                        'thread_length': len(emails)
                     })
-
-                user_emails = [e for e in emails_sorted if e.get('from', {}).get('emailAddress', {}).get('address', '').lower() == user_email.lower()]
-                external_emails = [e for e in emails_sorted if e.get('from', {}).get('emailAddress', {}).get('address', '').lower() != user_email.lower()]
-
-                user_response_count = 0
-                external_requiring_response = 0
-
-                for i, email in enumerate(emails_sorted[:-1]):
-                    from_email = email.get('from', {}).get('emailAddress', {}).get('address', '')
-                    if from_email.lower() != user_email.lower():
-                        external_requiring_response += 1
-                        next_email = emails_sorted[i + 1]
-                        next_from = next_email.get('from', {}).get('emailAddress', {}).get('address', '')
-                        if next_from.lower() == user_email.lower():
-                            user_response_count += 1
-
-                response_rate = (user_response_count / external_requiring_response * 100) if external_requiring_response > 0 else 0
 
                 conversation_analytics.append({
                     'conversation_id': conv_id,
-                    'total_emails': len(emails_sorted),
-                    'user_emails_count': len(user_emails),
-                    'external_emails_count': len(external_emails),
-                    'user_response_count': user_response_count,
-                    'response_rate_percent': round(response_rate, 2),
-                    'conversation_start_date': emails_sorted[0].get('receivedDateTime', '')[:10],
-                    'last_activity_date': emails_sorted[-1].get('receivedDateTime', '')[:10]
+                    'total_emails': len(emails),
+                    'user_emails_count': len([e for e in emails if e.get('from', {}).get('emailAddress', {}).get('address', '').lower() == user_email.lower()]),
+                    'external_emails_count': len([e for e in emails if e.get('from', {}).get('emailAddress', {}).get('address', '').lower() != user_email.lower()]),
+                    'user_response_count': 0,
+                    'response_rate_percent': 0,
+                    'conversation_start_date': emails[0].get('receivedDateTime', '')[:10] if emails else '',
+                    'last_activity_date': emails[-1].get('receivedDateTime', '')[:10] if emails else ''
                 })
 
-            logging.info(f"Analysis completed: {len(email_relationships)} relationships, {len(conversation_analytics)} conversation metrics")
+            logger.info(f"✅ Analysis completed: {len(email_relationships)} relationships, {len(conversation_analytics)} analytics")
 
             return {
                 "emails_by_folder": all_emails,
@@ -355,60 +335,73 @@ with DAG(
                 "conversation_analytics": conversation_analytics,
                 "total_count": total_count
             }
-        
+            
         except Exception as e:
-            logging.error(f"Error in analyze_email_responses: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"=== EMAIL ANALYSIS FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     @task()
-    def load_to_postgres(data):
+    def load_to_postgres_debug(data):
+        """Debug version of load_to_postgres with extensive logging"""
         conn = None
         cursor = None
         try:
-            logging.info("Starting load_to_postgres task")
-            logging.info(f"Data keys: {list(data.keys())}")
+            logger.info("=== STARTING POSTGRES LOAD (DEBUG MODE) ===")
+            logger.info(f"Received data keys: {list(data.keys())}")
             
-            # Test connection first
-            pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-            conn = pg_hook.get_conn()
-            cursor = conn.cursor()
-            
-            # Test connection
-            cursor.execute("SELECT 1;")
-            logging.info("PostgreSQL connection established successfully")
-
+            # Extract data
             emails = data.get('emails_by_folder', {})
             relationships = data.get('email_relationships', [])
             analytics = data.get('conversation_analytics', [])
             total_count = data.get('total_count', 0)
 
-            logging.info(f"Starting to load {total_count} emails to PostgreSQL")
-            logging.info(f"Relationships to load: {len(relationships)}")
-            logging.info(f"Analytics to load: {len(analytics)}")
+            logger.info(f"Data summary:")
+            logger.info(f"  - Total emails: {total_count}")
+            logger.info(f"  - Folders: {list(emails.keys())}")
+            logger.info(f"  - Relationships: {len(relationships)}")
+            logger.info(f"  - Analytics: {len(analytics)}")
 
-            # Insert emails with proper error handling and batch processing
-            email_count = 0
-            error_count = 0
+            # Test PostgreSQL connection
+            logger.info("Testing PostgreSQL connection...")
+            pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+            conn = pg_hook.get_conn()
+            cursor = conn.cursor()
             
+            cursor.execute("SELECT 1;")
+            logger.info("✅ PostgreSQL connection established")
+
+            # Check if tables exist
+            cursor.execute("""
+                SELECT table_name FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name IN ('email_group', 'email_relationships', 'conversation_analytics');
+            """)
+            existing_tables = [row[0] for row in cursor.fetchall()]
+            logger.info(f"Existing tables: {existing_tables}")
+
+            # Load emails (limited for debugging)
+            email_count = 0
             for folder, email_list in emails.items():
-                logging.info(f"Loading {len(email_list)} emails from folder '{folder}'")
+                logger.info(f"Processing {len(email_list)} emails from folder '{folder}'")
                 
-                for email in email_list:
+                for i, email in enumerate(email_list[:5]):  # Limit to 5 emails for debugging
                     try:
-                        # Handle None values and ensure proper data types
                         email_id = email.get('id')
                         if not email_id:
-                            logging.warning(f"Skipping email with no ID: {email}")
+                            logger.warning(f"Skipping email with no ID")
                             continue
-                            
+
+                        logger.info(f"Processing email {i+1}: {email_id}")
+                        
+                        # Extract data safely
                         conversation_id = email.get('conversationId')
-                        subject = email.get('subject', '')
+                        subject = email.get('subject', '')[:500]  # Limit subject length
+                        
                         from_address = ''
                         if email.get('from') and email.get('from').get('emailAddress'):
                             from_address = email.get('from').get('emailAddress').get('address', '')
                         
-                        # Handle recipients safely
                         to_recipients = []
                         if email.get('toRecipients'):
                             to_recipients = [r.get('emailAddress', {}).get('address', '') for r in email.get('toRecipients', []) if r.get('emailAddress')]
@@ -416,11 +409,9 @@ with DAG(
                         cc_recipients = []
                         if email.get('ccRecipients'):
                             cc_recipients = [r.get('emailAddress', {}).get('address', '') for r in email.get('ccRecipients', []) if r.get('emailAddress')]
-                        
-                        # Handle datetime fields
-                        received_datetime = email.get('receivedDateTime')
-                        sent_datetime = email.get('sentDateTime')
-                        
+
+                        logger.info(f"  Email data: subject='{subject[:50]}...', from='{from_address}', to_count={len(to_recipients)}")
+
                         cursor.execute("""
                             INSERT INTO email_group (email_id, conversation_id, subject, from_address, to_recipients, cc_recipients, received_datetime, sent_datetime, is_read, has_attachments, importance, folder, internet_message_id)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -444,36 +435,29 @@ with DAG(
                             from_address,
                             json.dumps(to_recipients),
                             json.dumps(cc_recipients),
-                            received_datetime,
-                            sent_datetime,
+                            email.get('receivedDateTime'),
+                            email.get('sentDateTime'),
                             email.get('isRead', False),
                             email.get('hasAttachments', False),
                             email.get('importance', 'normal'),
                             folder,
                             email.get('internetMessageId')
                         ))
-                        email_count += 1
                         
-                        # Commit every 1000 emails and log progress
-                        if email_count % 1000 == 0:
-                            conn.commit()
-                            logging.info(f"Loaded {email_count} emails so far...")
-                            
+                        email_count += 1
+                        logger.info(f"  ✅ Email {i+1} inserted successfully")
+                        
                     except Exception as e:
-                        logging.error(f"Error inserting email {email.get('id', 'unknown')}: {str(e)}")
-                        logging.error(f"Email data: {email}")
-                        error_count += 1
+                        logger.error(f"  ❌ Error inserting email {i+1}: {str(e)}")
+                        logger.error(f"  Email data: {email}")
                         continue
 
-            # Final commit for emails
             conn.commit()
-            logging.info(f"Loaded {email_count} emails successfully, {error_count} errors")
+            logger.info(f"✅ Successfully loaded {email_count} emails")
 
-            # Insert relationships
-            relationship_count = 0
-            relationship_errors = 0
-            
-            for rel in relationships:
+            # Load a few relationships for testing
+            rel_count = 0
+            for rel in relationships[:5]:  # Limit for debugging
                 try:
                     cursor.execute("""
                         INSERT INTO email_relationships (email_id, conversation_id, is_response, is_from_user, original_email_id, response_time_hours, position_in_thread, thread_length)
@@ -487,30 +471,21 @@ with DAG(
                             position_in_thread = EXCLUDED.position_in_thread,
                             thread_length = EXCLUDED.thread_length;
                     """, (
-                        rel['email_id'], rel['conversation_id'], rel['is_response'], rel['is_from_user'],
-                        rel['original_email_id'], rel['response_time_hours'], rel['position_in_thread'], rel['thread_length']
+                        rel['email_id'], rel['conversation_id'], rel['is_response'], 
+                        rel['is_from_user'], rel['original_email_id'], rel['response_time_hours'], 
+                        rel['position_in_thread'], rel['thread_length']
                     ))
-                    relationship_count += 1
-                    
-                    if relationship_count % 1000 == 0:
-                        conn.commit()
-                        logging.info(f"Loaded {relationship_count} relationships so far...")
-                        
+                    rel_count += 1
                 except Exception as e:
-                    logging.error(f"Error inserting relationship for email {rel.get('email_id', 'unknown')}: {str(e)}")
-                    logging.error(f"Relationship data: {rel}")
-                    relationship_errors += 1
+                    logger.error(f"Error inserting relationship: {str(e)}")
                     continue
 
-            # Final commit for relationships
             conn.commit()
-            logging.info(f"Loaded {relationship_count} relationships successfully, {relationship_errors} errors")
+            logger.info(f"✅ Successfully loaded {rel_count} relationships")
 
-            # Insert analytics with upsert
+            # Load analytics
             analytics_count = 0
-            analytics_errors = 0
-            
-            for metric in analytics:
+            for metric in analytics[:5]:  # Limit for debugging
                 try:
                     cursor.execute("""
                         INSERT INTO conversation_analytics (conversation_id, total_emails, user_emails_count, external_emails_count, user_response_count, response_rate_percent, conversation_start_date, last_activity_date)
@@ -527,40 +502,29 @@ with DAG(
                     """, (
                         metric['conversation_id'], metric['total_emails'], metric['user_emails_count'],
                         metric['external_emails_count'], metric['user_response_count'],
-                        metric['response_rate_percent'], metric['conversation_start_date'], metric['last_activity_date']
+                        metric['response_rate_percent'], metric['conversation_start_date'], 
+                        metric['last_activity_date']
                     ))
                     analytics_count += 1
-                    
-                    if analytics_count % 100 == 0:
-                        conn.commit()
-                        logging.info(f"Loaded {analytics_count} analytics records so far...")
-                        
                 except Exception as e:
-                    logging.error(f"Error inserting analytics for conversation {metric.get('conversation_id', 'unknown')}: {str(e)}")
-                    logging.error(f"Analytics data: {metric}")
-                    analytics_errors += 1
+                    logger.error(f"Error inserting analytics: {str(e)}")
                     continue
 
-            # Final commit
             conn.commit()
-            
-            logging.info(f"Data loading completed successfully:")
-            logging.info(f"  - Emails: {email_count} loaded, {error_count} errors")
-            logging.info(f"  - Relationships: {relationship_count} loaded, {relationship_errors} errors")
-            logging.info(f"  - Analytics: {analytics_count} loaded, {analytics_errors} errors")
-            
+            logger.info(f"✅ Successfully loaded {analytics_count} analytics records")
+
+            logger.info("=== POSTGRES LOAD COMPLETED SUCCESSFULLY ===")
             return {
+                "status": "success",
                 "emails_loaded": email_count,
-                "emails_errors": error_count,
-                "relationships_loaded": relationship_count,
-                "relationships_errors": relationship_errors,
-                "analytics_loaded": analytics_count,
-                "analytics_errors": analytics_errors
+                "relationships_loaded": rel_count,
+                "analytics_loaded": analytics_count
             }
 
         except Exception as e:
-            logging.error(f"Critical error in load_to_postgres: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"=== POSTGRES LOAD FAILED ===")
+            logger.error(f"Error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             if conn:
                 conn.rollback()
             raise
@@ -570,16 +534,17 @@ with DAG(
                     cursor.close()
                 if conn:
                     conn.close()
-                logging.info("Database connections closed")
+                logger.info("Database connections closed")
             except Exception as e:
-                logging.error(f"Error closing database connections: {str(e)}")
+                logger.error(f"Error closing connections: {str(e)}")
 
-    # Define task dependencies
+    # Define task dependencies with proper testing flow
+    test_conn = test_connections()
     tables = create_tables()
     token = get_graph_token()
-    raw_data = extract_emails_from_folders(token)
+    raw_data = extract_limited_emails(token)
     analytics = analyze_email_responses(raw_data)
-    load_data = load_to_postgres(analytics)
+    load_data = load_to_postgres_debug(analytics)
     
     # Set up dependencies
-    tables >> token >> raw_data >> analytics >> load_data
+    test_conn >> tables >> token >> raw_data >> analytics >> load_data
